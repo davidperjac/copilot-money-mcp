@@ -238,6 +238,39 @@ The `period` parameter supports these shortcuts:
 
 Both `--live-reads` and `--write` make authenticated calls to Copilot Money's GraphQL API at `app.copilot.money/api/graphql`. They require a **logged-in browser session** against `app.copilot.money` — the server reads the same Firebase refresh token the web app stores in your browser. Ten browsers are searched — Chrome, Arc, Microsoft Edge, Brave, Vivaldi, Chromium, Opera, Opera GX, Safari, and Firefox — and each Chromium-family browser across every one of its profiles, not just the default one. See [PRIVACY.md](PRIVACY.md) for exactly which files are read and why the browser-wide `Local Storage` read is not scoped to Copilot's origin.
 
+On **Linux** the Linux locations are searched instead: Chrome (`~/.config/google-chrome`, plus `-beta` / `-unstable`), Microsoft Edge (`~/.config/microsoft-edge`), Brave (`~/.config/BraveSoftware/Brave-Browser`), Vivaldi (`~/.config/vivaldi`), Chromium (`~/.config/chromium` and the snap's `~/snap/chromium/common/chromium`), Opera (`~/.config/opera`), and Firefox (`~/.mozilla/firefox`, the snap's `~/snap/firefox/common/.mozilla/firefox`, and the flatpak's `~/.var/app/org.mozilla.firefox/.mozilla/firefox`). The `~/.config` locations honour `XDG_CONFIG_HOME`. Arc, Safari and Opera GX are macOS-only.
+
+#### Choosing the browser and profile: `--browser` / `--browser-profile`
+
+By default the browsers above are tried in that fixed order and the first working session wins. If more than one Copilot account is logged in on the machine — say one person in Brave and another in Chrome — pin the one to use:
+
+| Flag | Environment variable | Value |
+| --- | --- | --- |
+| `--browser <name>` | `COPILOT_BROWSER` | `chrome`, `arc`, `edge` (or `microsoft-edge`), `brave`, `vivaldi`, `chromium`, `opera`, `opera-gx` (or `operagx`), `safari`, `firefox` — case-insensitive |
+| `--browser-profile <name>` | `COPILOT_BROWSER_PROFILE` | Chromium family: the profile directory (`Default`, `Profile 2`) or the profile's display name as shown in the browser. Firefox: the profile directory (`abcd1234.default-release`), the part after its first dot (`default-release`), or its `Name=` in `profiles.ini`. Case-insensitive. Requires a browser. |
+| `--browser-data-dir <path>` | `COPILOT_BROWSER_DATA_DIR` | A custom user-data root that **replaces** the browser's default locations — for a browser launched with `--user-data-dir`, a portable install, or a copied profile. Chromium family: the folder holding `Local State` and the `Default` / `Profile N` dirs (Opera: also its root-layout storage). Firefox: a profiles root (holding `profiles.ini` and/or the profile dirs, directly or under `Profiles/`), or a single profile directory (one holding `storage/default`, `prefs.js` or `times.json`). A leading `~` is expanded and a relative path resolves against the working directory. Requires a browser; not supported for Safari. |
+
+Each flag wins over its environment variable. With a browser selected, **only that browser** (and, with a profile, only that profile) is read — there is no fallback to the others, so the session can never silently come from someone else's browser. If nothing is found, the error names exactly what was searched, e.g. `No Copilot Money session found in Brave (profile "Default"). …`, and says so when the browser's data directory or the profile does not exist. An unknown browser name, a profile without a browser, or a macOS-only browser on Linux stops the server at startup with an error. The selection only matters with `--live-reads` or `--write`.
+
+With `--browser-data-dir`, only that directory is read — not the browser's default locations and not any other browser. `--browser-profile` then matches profiles inside it (directory name, `Local State` display name, Firefox suffix or `profiles.ini` `Name=`, with relative `Path=` entries resolved against the data dir). Pointed at a single Firefox profile, no `--browser-profile` is needed, and one that names a different profile is refused. The server refuses to start if the path does not exist or is not a directory, if no browser is given, or if the browser is Safari (whose locations are fixed by macOS). If the directory holds no session, the error names it: `No Copilot Money session found in Chrome (data dir "/home/me/chrome-profile/Fork-18"). …`.
+
+```json
+{
+  "mcpServers": {
+    "copilot-money": {
+      "command": "copilot-money-mcp",
+      "args": ["--live-reads", "--browser", "brave", "--browser-profile", "Default"]
+    }
+  }
+}
+```
+
+Or, equivalently, `"env": { "COPILOT_BROWSER": "brave", "COPILOT_BROWSER_PROFILE": "Default" }` in the same entry. For a Chrome started with a custom `--user-data-dir`:
+
+```json
+"args": ["--live-reads", "--browser", "chrome", "--browser-data-dir", "/home/me/chrome-profile/Fork-18"]
+```
+
 Default mode requires no authentication and makes zero network requests — reads come from the local LevelDB cache.
 
 ### `--live-reads`: real-time reads via GraphQL

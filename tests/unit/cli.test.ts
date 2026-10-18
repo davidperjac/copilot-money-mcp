@@ -6,6 +6,9 @@
  */
 
 import { describe, test, expect } from 'bun:test';
+import { mkdtempSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 
 const CLI_PATH = new URL('../../src/cli.ts', import.meta.url).pathname;
 
@@ -17,9 +20,19 @@ const PROC_TIMEOUT_MS = 3_000;
  * PROC_TIMEOUT_MS, then kill and return { exitCode, stdout, stderr }.
  */
 async function runCli(
-  args: string[] = []
+  args: string[] = [],
+  env: Record<string, string | undefined> = {}
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   const proc = Bun.spawn(['bun', 'run', CLI_PATH, ...args], {
+    // Start from a clean selection so the developer's own COPILOT_BROWSER*
+    // never leaks into these tests; `env` then adds what a test sets.
+    env: {
+      ...process.env,
+      COPILOT_BROWSER: '',
+      COPILOT_BROWSER_PROFILE: '',
+      COPILOT_BROWSER_DATA_DIR: '',
+      ...env,
+    },
     stdout: 'pipe',
     stderr: 'pipe',
     // Don't provide stdin so the server has nothing to read from
@@ -164,6 +177,147 @@ describe('CLI entry point', () => {
       // Should not contain any argument parsing errors
       expect(stderr).not.toContain('Invalid');
       expect(stderr).not.toContain('Usage');
+    });
+  });
+
+  describe('--browser / --browser-profile', () => {
+    test('--help documents the flags, the env vars and the valid names', async () => {
+      const { exitCode, stderr } = await runCli(['--help']);
+
+      expect(exitCode).toBe(0);
+      expect(stderr).toContain('--browser <name>');
+      expect(stderr).toContain('--browser-profile <name>');
+      expect(stderr).toContain('COPILOT_BROWSER');
+      expect(stderr).toContain('COPILOT_BROWSER_PROFILE');
+      expect(stderr).toContain('opera-gx');
+    });
+
+    test('an unknown --browser exits 1 listing the valid names', async () => {
+      const { exitCode, stderr } = await runCli(['--browser', 'netscape', '--live-reads']);
+
+      expect(exitCode).toBe(1);
+      expect(stderr).toContain('Unknown browser "netscape"');
+      expect(stderr).toContain('chrome, arc, edge, brave');
+    });
+
+    test('an unknown COPILOT_BROWSER exits 1 too', async () => {
+      const { exitCode, stderr } = await runCli(['--live-reads'], { COPILOT_BROWSER: 'netscape' });
+
+      expect(exitCode).toBe(1);
+      expect(stderr).toContain('Unknown browser "netscape"');
+    });
+
+    test('the --browser flag wins over COPILOT_BROWSER', async () => {
+      // A bad flag fails even though the env var names a valid browser…
+      const flagBad = await runCli(['--browser', 'netscape'], { COPILOT_BROWSER: 'brave' });
+      expect(flagBad.exitCode).toBe(1);
+      expect(flagBad.stderr).toContain('Unknown browser "netscape"');
+
+      // …and a good flag overrides a bad env var (startup proceeds, so it is
+      // killed by the timeout rather than exiting 1 on the selection).
+      const flagGood = await runCli(['--browser', 'brave', '-v'], { COPILOT_BROWSER: 'netscape' });
+      expect(flagGood.stderr).not.toContain('Unknown browser');
+      expect(flagGood.stderr).toContain('Browser selection Brave ignored');
+    });
+
+    test('--browser-profile without --browser exits 1', async () => {
+      const { exitCode, stderr } = await runCli(['--browser-profile', 'Default', '--live-reads']);
+
+      expect(exitCode).toBe(1);
+      expect(stderr).toContain('requires --browser');
+    });
+
+    test('COPILOT_BROWSER_PROFILE without a browser exits 1', async () => {
+      const { exitCode, stderr } = await runCli(['--live-reads'], {
+        COPILOT_BROWSER_PROFILE: 'Default',
+      });
+
+      expect(exitCode).toBe(1);
+      expect(stderr).toContain('requires --browser');
+    });
+
+    test('--browser with no value exits 1', async () => {
+      const { exitCode, stderr } = await runCli(['--browser']);
+
+      expect(exitCode).toBe(1);
+      expect(stderr).toContain('--browser requires a value');
+    });
+
+    test('a selection without --live-reads/--write is reported as ignored in verbose mode', async () => {
+      const { stderr } = await runCli([
+        '--browser',
+        'Microsoft-Edge',
+        '--browser-profile',
+        'Work',
+        '-v',
+      ]);
+
+      expect(stderr).toContain('Browser selection Microsoft Edge (profile "Work") ignored');
+    });
+  });
+
+  describe('--browser-data-dir', () => {
+    test('--help documents the flag and COPILOT_BROWSER_DATA_DIR', async () => {
+      const { stderr } = await runCli(['--help']);
+
+      expect(stderr).toContain('--browser-data-dir <path>');
+      expect(stderr).toContain('COPILOT_BROWSER_DATA_DIR');
+    });
+
+    test('without --browser exits 1', async () => {
+      const { exitCode, stderr } = await runCli(['--browser-data-dir', tmpdir(), '--live-reads']);
+
+      expect(exitCode).toBe(1);
+      expect(stderr).toContain('--browser-data-dir (COPILOT_BROWSER_DATA_DIR) requires --browser');
+    });
+
+    test('COPILOT_BROWSER_DATA_DIR without a browser exits 1', async () => {
+      const { exitCode, stderr } = await runCli(['--live-reads'], {
+        COPILOT_BROWSER_DATA_DIR: tmpdir(),
+      });
+
+      expect(exitCode).toBe(1);
+      expect(stderr).toContain('requires --browser');
+    });
+
+    test('a path that does not exist exits 1', async () => {
+      const missing = join(tmpdir(), `cmm-no-such-dir-${process.pid}-${Date.now()}`);
+      const { exitCode, stderr } = await runCli([
+        '--browser',
+        'chrome',
+        '--browser-data-dir',
+        missing,
+      ]);
+
+      expect(exitCode).toBe(1);
+      expect(stderr).toContain(`"${missing}" does not exist.`);
+    });
+
+    test('Safari with a data dir exits 1', async () => {
+      const { exitCode, stderr } = await runCli(
+        ['--browser', 'safari', '--browser-data-dir', tmpdir()],
+        {}
+      );
+
+      expect(exitCode).toBe(1);
+      // On Linux Safari is refused first for the platform; elsewhere for the data dir.
+      expect(stderr).toMatch(
+        /Safari (does not support --browser-data-dir|is not supported on this platform)/
+      );
+    });
+
+    test('the flag wins over the env var, and verbose mode names the data dir', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'cmm-cli-datadir-'));
+      try {
+        const { stderr } = await runCli(['--browser', 'brave', '--browser-data-dir', dir, '-v'], {
+          COPILOT_BROWSER_DATA_DIR: join(dir, 'does-not-exist'),
+        });
+
+        expect(stderr).not.toContain('does not exist');
+        expect(stderr).toContain(`Brave (data dir "${dir}")`);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     });
   });
 });
